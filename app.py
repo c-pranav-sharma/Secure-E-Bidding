@@ -121,6 +121,7 @@ class User(UserMixin, db.Document):
 
 class Bid(db.Document):
     contractor_name = db.StringField(max_length=150)
+    target_officer = db.StringField(max_length=150, required=True)
     amount = db.IntField(required=True, default=0) # Bid Amount
     encrypted_data = db.BinaryField(required=True) 
     encrypted_key = db.BinaryField(required=True)
@@ -323,16 +324,35 @@ def verify_email_page():
 
             new_user.save()
             
-            # Download Private Key
+            # Prepare Private Key for Download (via Data URI)
             priv_pem = user_private.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption()
             )
+            b64_key = base64.b64encode(priv_pem).decode()
+            download_link = f"data:application/x-pem-file;base64,{b64_key}"
+            
             session.pop('temp_user', None)
             
-            flash(f"Account Created! MFA Secret: {mfa_secret}. SAVE YOUR PRIVATE KEY!", "success")
-            return send_file(io.BytesIO(priv_pem), mimetype='application/x-pem-file', as_attachment=True, download_name=f"{data['username']}_private_key.pem")
+            # Render Success Page directly
+            content = f"""
+            <div class="card p-4 mx-auto shadow" style="max-width:500px">
+                <h3 class="text-center text-success mb-3">Registration Successful!</h3>
+                <div class="alert alert-success">
+                    <strong>1. Setup MFA:</strong><br>
+                    Secret Key: <code class="fs-4">{mfa_secret}</code><br>
+                    (Enter this in your Google Authenticator app)
+                </div>
+                <div class="alert alert-warning">
+                    <strong>2. Save Your Private Key:</strong><br>
+                    You need this file to sign bids. If you lose it, you cannot recover it.<br>
+                    <a href="{download_link}" download="{data['username']}_private_key.pem" class="btn btn-danger w-100 mt-2">Download Private Key</a>
+                </div>
+                <div class="text-center mt-3"><a href="/" class="btn btn-primary">Go to Login</a></div>
+            </div>
+            """
+            return render_template_string(HTML_LAYOUT, content=content)
         else:
             flash("Wrong OTP!", "danger")
 
@@ -427,12 +447,22 @@ def reset_password_page():
 @login_required
 def dashboard():
     if current_user.role == 'contractor':
-        content = """
+        officers = User.objects(role='officer')
+        officer_options = "".join([f'<option value="{o.username}">{o.username} ({o.email})</option>' for o in officers])
+        
+        content = f"""
         <div class="row"><div class="col-md-6 offset-md-3"><div class="card shadow-sm"><div class="card-body text-center p-5">
             <h2 class="card-title mb-3">Submit Sealed Bid</h2>
             <form action="/upload_bid" method="POST" enctype="multipart/form-data">
-                <div class="mb-4"><label class="fw-bold">1. Upload Bid PDF</label><input class="form-control" type="file" name="bid_file" accept="application/pdf" required></div>
-                <div class="mb-4"><label class="fw-bold text-danger">2. Upload Your Private Key (Sign)</label><input class="form-control" type="file" name="private_key" accept=".pem" required></div>
+                <div class="mb-4 text-start">
+                    <label class="fw-bold">1. Select Tender Officer</label>
+                    <select name="target_officer" class="form-select" required>
+                        <option value="">-- Select Officer --</option>
+                        {officer_options}
+                    </select>
+                </div>
+                <div class="mb-4 text-start"><label class="fw-bold">2. Upload Bid PDF</label><input class="form-control" type="file" name="bid_file" accept="application/pdf" required></div>
+                <div class="mb-4 text-start"><label class="fw-bold text-danger">3. Upload Your Private Key (Sign)</label><input class="form-control" type="file" name="private_key" accept=".pem" required></div>
                 <div class="form-group mb-3 text-start"><label class="fw-bold">Bid Amount ($)</label><input type="number" name="amount" class="form-control form-control-lg" required></div>
                 <button class="btn btn-primary btn-lg w-100">🔒 Sign, Encrypt & Submit</button>
             </form>
@@ -451,13 +481,96 @@ def dashboard():
         content = f"""<div class="card shadow-sm"><div class="card-header bg-dark text-white"><h4>User Management</h4></div><div class="card-body p-0"><table class="table table-striped"><thead><tr><th>ID</th><th>User</th><th>Email</th><th>Role</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
     elif current_user.role == 'public':
         bids = Bid.objects()
-        rows = "".join([f"<tr><td>{b.id}</td><td>{b.contractor_name}</td><td>{b.timestamp}</td><td><span class='badge bg-secondary'>Locked</span></td><td>Restricted</td></tr>" for b in bids])
+        rows = "".join([f"<tr><td>{i}</td><td>{b.contractor_name}</td><td>{b.timestamp}</td><td><span class='badge bg-secondary'>Locked</span></td><td>Restricted</td></tr>" for i, b in enumerate(bids, 1)])
         content = f"""<div class="alert alert-info">Public Mode: Read Only.</div><div class="card"><table class="table"><thead><tr><th>ID</th><th>Contractor</th><th>Time</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table></div>"""
     else: # Officer
-        bids = Bid.objects()
-        rows = "".join([f"<tr><td>{b.id}</td><td>{b.contractor_name}</td><td>${b.amount}</td><td>{b.timestamp}</td><td><span class='badge bg-success'>Sealed</span></td><td><a href='/decrypt_bid/{b.id}' class='btn btn-sm btn-warning'>🔓 Decrypt & Verify</a></td></tr>" for b in bids])
-        content = f"""<div class="card"><div class="card-header"><h4>Officer Dashboard</h4></div><table class="table"><thead><tr><th>ID</th><th>Contractor</th><th>Bid Amount</th><th>Time</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table></div>"""
+        # Targeted Bidding: Only show bids for THIS officer
+        bids = Bid.objects(target_officer=current_user.username)
+        
+        rows_list = []
+        for i, b in enumerate(bids, 1):
+            action_html = f'<a href="/verify_bid_page/{b.id}" class="btn btn-sm btn-warning">🔓 Decrypt</a>'
+            rows_list.append(f"<tr><td>{i}</td><td>{b.contractor_name}</td><td>${b.amount}</td><td>{b.timestamp}</td><td><span class='badge bg-secondary'>Sealed</span></td><td>{action_html}</td></tr>")
+            
+        rows = "".join(rows_list)
+        content = f"""<div class="card"><div class="card-header"><h4>Officer Dashboard (My Bids)</h4></div><table class="table"><thead><tr><th>ID</th><th>Contractor</th><th>Bid Amount</th><th>Time</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table></div>"""
     return render_template_string(HTML_LAYOUT, content=content)
+
+@app.route('/verify_bid_page/<bid_id>')
+@login_required
+@role_required('officer')
+def verify_bid_page(bid_id):
+    bid = Bid.objects(id=bid_id).first_or_404()
+    # Security check: Ensure this officer is the target
+    if bid.target_officer != current_user.username:
+        flash("You are not authorized to view this bid.", "danger")
+        return redirect(url_for('dashboard'))
+
+    content = f"""
+    <div class="row"><div class="col-md-6 offset-md-3"><div class="card shadow"><div class="card-body p-4">
+        <h3 class="card-title text-center mb-4">Decrypt Bid #{bid_id[-6:]}</h3> 
+        <div class="alert alert-warning">
+            This bid is encrypted for you. Upload your <strong>Private Key</strong> to decrypt it.
+        </div>
+        <form action="/perform_decryption" method="POST" enctype="multipart/form-data">
+            <input type="hidden" name="bid_id" value="{bid_id}">
+            <div class="mb-3">
+                <label>Your Private Key (.pem)</label>
+                <input type="file" name="officer_private_key" class="form-control" accept=".pem" required>
+            </div>
+            <button class="btn btn-success w-100">Unlock & Verify</button>
+        </form>
+        <div class="text-center mt-3"><a href="/dashboard">Cancel</a></div>
+    </div></div></div></div>
+    """
+    return render_template_string(HTML_LAYOUT, content=content)
+
+@app.route('/perform_decryption', methods=['POST'])
+@login_required
+@role_required('officer')
+def perform_decryption():
+    bid_id = request.form.get('bid_id')
+    bid = Bid.objects(id=bid_id).first_or_404()
+    
+    if bid.target_officer != current_user.username:
+        flash("Unauthorized!", "danger")
+        return redirect(url_for('dashboard'))
+
+    pkey_file = request.files.get('officer_private_key')
+    if not pkey_file: return redirect(url_for('dashboard'))
+    
+    try:
+        # Load Officer's Private Key
+        officer_private = serialization.load_pem_private_key(pkey_file.read(), password=None)
+        
+        # 1. Decrypt AES Key
+        aes_key = officer_private.decrypt(
+            bid.encrypted_key,
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+        )
+        
+        # 2. Decrypt PDF
+        pdf_data = Fernet(aes_key).decrypt(bid.encrypted_data)
+        
+        # 3. Verify Signature
+        contractor = User.objects(username=bid.contractor_name).first()
+        pub_key = serialization.load_pem_public_key(contractor.public_key_pem.encode())
+        pub_key.verify(
+            bid.digital_signature, 
+            pdf_data, 
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH), 
+            hashes.SHA256()
+        )
+        
+        # 4. Hash Check
+        if hashlib.sha256(pdf_data).hexdigest() != bid.file_hash:
+            return "INTEGRITY ERROR: Hash Mismatch!"
+            
+        return send_file(io.BytesIO(pdf_data), mimetype='application/pdf', as_attachment=True, download_name=f"Verified_{bid.contractor_name}.pdf")
+
+    except Exception as e:
+        print(f"Decryption Error: {e}")
+        return f"Decryption Failed: {str(e)}"
 
 @app.route('/upload_bid', methods=['POST'])
 @login_required
@@ -470,6 +583,7 @@ def upload_bid():
     file = request.files['bid_file']
     pkey_file = request.files['private_key']
     amount = request.form.get('amount')
+    target_officer_username = request.form.get('target_officer')
     file_data = file.read()
     
     # --- CONSOLE NARRATOR (NO EMOJIS FOR WINDOWS) ---
@@ -487,17 +601,39 @@ def upload_bid():
 
     # Encryption
     print(f"\n [STEP 2] [ENCRYPT] ENCRYPTING BID:")
+    
+    # --- TARGETED ENCRYPTION ---
+    target_officer = User.objects(username=target_officer_username).first()
+    if not target_officer or not target_officer.public_key_pem:
+        flash("Target Officer not found or invalid keys!", "danger")
+        return redirect(url_for('dashboard'))
+
+    officer_pub_key = serialization.load_pem_public_key(target_officer.public_key_pem.encode())
+    
     print(f"   > Generating AES Session Key...")
     aes_key = Fernet.generate_key()
     fernet = Fernet(aes_key)
     print(f"   > Encrypting PDF data with AES...")
     encrypted_data = fernet.encrypt(file_data)
-    print(f"   > Loading Officer's Public Key...")
+    
+    print(f"   > Loading {target_officer.username}'s Public Key...")
     print(f"   > Encrypting AES Key with RSA (Sealing)...")
-    encrypted_key = encrypt_for_officer(aes_key)
+    
+    encrypted_key = officer_pub_key.encrypt(
+        aes_key,
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+    )
     print(f"   > [OK] Bid Successfully Sealed.")
 
-    new_bid = Bid(contractor_name=current_user.username, amount=amount, encrypted_data=encrypted_data, encrypted_key=encrypted_key, file_hash=hashlib.sha256(file_data).hexdigest(), digital_signature=signature)
+    new_bid = Bid(
+        contractor_name=current_user.username, 
+        target_officer=target_officer.username,
+        amount=amount, 
+        encrypted_data=encrypted_data, 
+        encrypted_key=encrypted_key, 
+        file_hash=hashlib.sha256(file_data).hexdigest(), 
+        digital_signature=signature
+    )
     new_bid.save()
     
     # Receipt
