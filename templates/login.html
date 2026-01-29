@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>E-Tendering</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body>
+  <div class="container">
+    <div class="left">
+      <div class="characters" id="characters">
+        <div class="shape shape-orange">
+          <div class="eyes">
+            <div class="eye"><div class="pupil"></div></div>
+            <div class="eye"><div class="pupil"></div></div>
+          </div>
+        </div>
+        <div class="shape shape-purple">
+          <div class="eyes">
+            <div class="eye"><div class="pupil"></div></div>
+            <div class="eye"><div class="pupil"></div></div>
+          </div>
+        </div>
+        <div class="shape shape-black">
+          <div class="eyes">
+            <div class="eye"><div class="pupil"></div></div>
+            <div class="eye"><div class="pupil"></div></div>
+          </div>
+        </div>
+        <div class="shape shape-yellow">
+          <div class="eyes">
+            <div class="eye"><div class="pupil"></div></div>
+            <div class="eye"><div class="pupil"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="right">
+      <div class="logo-mark">+</div>
+
+      <h1>Secure Sealed-Bid E-Tendering System</h1>
+      <p class="subtitle">Please enter your details to sign in.</p>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div style="color: #721c24; background-color: #f8d7da; padding: 10px; margin-bottom: 15px; border-radius: 5px; font-size: 13px;">
+              {{ message }}
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      <form method="POST" action="/login">
+        
+        <div class="field">
+          <label for="email">Username</label>
+          <input id="email" name="username" type="text" required />
+        </div>
+
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="password-wrapper">
+            <input id="password" name="password" type="password" required />
+            <button type="button" class="toggle-password" id="togglePassword">
+              <span id="toggleIcon">👁</span>
+              <span id="toggleText">Show</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="otp">MFA Code (TOTP)</label>
+          <input id="otp" name="otp" type="text" placeholder="Enter 6-digit code" required />
+          <p style="font-size: 11px; color: #888; margin-top: 4px;">(For Lab: Use '000000' if MFA not set up)</p>
+        </div>
+
+        <button type="submit" class="primary-btn">Sign in</button>
+        
+        <div style="text-align: center; margin-bottom: 15px;">
+            <a href="/forgot_password" style="font-size: 13px; color: #555; text-decoration: none;">Forgot Password?</a>
+        </div>
+
+        <p class="footer-text">
+          Don’t have an account?
+          <a href="/register">Create an account</a>
+        </p>
+      </form>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
